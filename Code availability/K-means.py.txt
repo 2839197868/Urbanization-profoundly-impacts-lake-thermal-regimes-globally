@@ -1,0 +1,21 @@
+import pandas as pd
+from sklearn.cluster import KMeans
+
+# 读取Excel文件
+data = pd.read_excel('亚热带季风气候增温速率(分类4) .xlsx',sheet_name='1')
+
+# 提取需要用于聚类的特征列
+features = data[['Lake_area','Vol_total','Depth_avg']]  # 根据实际情况修改特征列名
+
+# 实例化KMeans对象，并指定聚类数量
+kmeans = KMeans(n_clusters=4)  # 根据实际情况修改聚类数量
+
+# 执行K-means算法
+kmeans.fit(features)
+
+# 获取聚类结果
+labels = kmeans.labels_
+
+# 将聚类结果添加到原始数据中
+for cluster in labels:
+    print(cluster)

@@ -1,0 +1,47 @@
+import numpy as np
+import pandas as pd
+import scipy.stats as stats
+path = 'D:\\Datasets\\lake_temperature_test\\have_ice_lakes\\ice_lake_temperature\\glaciated_andnon_rate.xlsx'
+data = pd.read_excel(path, header=0)
+# 示例数据：两组独立样本
+group_a = data['Glaciated_rate']
+group_a = group_a.dropna()
+group_b = data['Non-glaciated_rate']
+group_b = group_b.dropna()
+
+# 计算两组样本的均值和标准差
+mean_a = np.mean(group_a)
+mean_b = np.mean(group_b)
+std_a = np.std(group_a, ddof=1)  # 使用ddof=1来计算样本标准差
+std_b = np.std(group_b, ddof=1)
+
+print(f"组A的均值: {mean_a}, 标准差: {std_a}")
+print(f"组B的均值: {mean_b}, 标准差: {std_b}")
+
+# 独立样本T检验
+t_stat, p_value = stats.ttest_ind(group_a, group_b)
+
+print(f"T值: {t_stat}, P值: {p_value}")
+
+# 设定显著性水平
+alpha = 0.05
+
+# 检查P值是否小于显著性水平
+if p_value < alpha:
+    print("拒绝零假设，认为两组之间的均值有显著差异。")
+else:
+    print("不拒绝零假设，认为两组之间的均值没有显著差异。")
+
+
+# 检查数据的有效性
+# 转换为numpy数组并检查数据是否有效
+group_a = np.array(group_a)
+group_b = np.array(group_b)
+
+# 检查数据中是否有NaN或无限值
+if np.any(np.isnan(group_a)) or np.any(np.isnan(group_b)) or np.any(np.isinf(group_a)) or np.any(np.isinf(group_b)):
+    raise ValueError("数据中包含NaN或无限值，请清理数据后再进行分析。")
+
+# 检查每组数据的标准差是否为零
+if np.std(group_a, ddof=1) == 0 or np.std(group_b, ddof=1) == 0:
+    raise ValueError("某组数据的标准差为零，无法进行T检验。")

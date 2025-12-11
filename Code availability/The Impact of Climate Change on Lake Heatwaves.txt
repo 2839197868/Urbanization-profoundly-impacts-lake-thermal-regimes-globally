@@ -1,0 +1,361 @@
+import pandas as pd
+import statsmodels.api as sm
+from scipy.stats import norm
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+def sobel_test(a, se_a, b, se_b):
+    """
+    Sobel检验计算乘积效应的显著性
+    """
+    indirect_effect = a * b
+    se_indirect = np.sqrt(a**2 * se_b**2 + b**2 * se_a**2)
+    z_score = indirect_effect / se_indirect
+    p_value = 2 * (1 - norm.cdf(abs(z_score)))
+    return p_value, z_score
+
+def get_significance(p_value):
+    """根据p值返回显著性标记"""
+    if p_value < 0.001:
+        return "***"
+    elif p_value < 0.01:
+        return "**"
+    elif p_value < 0.05:
+        return "*"
+    else:
+        return ""
+
+def integrated_climate_mediation_analysis(data_path, output_path=None):
+    """
+    整合版气候因子对湖泊变暖及热浪影响的中介效应分析
+    采用代码1的贡献度计算方式和代码2的链式效应计算方式
+    """
+    # 读取数据（支持Excel和CSV格式）
+    if data_path.endswith('.csv'):
+        try:
+            data = pd.read_csv(data_path, encoding='utf-8')
+        except UnicodeDecodeError:
+            try:
+                data = pd.read_csv(data_path, encoding='gbk')
+            except:
+                data = pd.read_csv(data_path, encoding='latin-1')
+    elif data_path.endswith(('.xlsx', '.xls')):
+        data = pd.read_excel(data_path)
+    else:
+        raise ValueError("不支持的文件格式，请使用CSV或Excel格式")
+    
+    # 定义变量
+    mediator_var = 'LSWT'      # 中介变量
+    climate_vars = ['AT', 'P', 'SR', 'WS', 'ET']
+    
+    # 检查必要列是否存在
+    required_cols = [mediator_var] + climate_vars + ['intensity', 'count', 'duration']
+    missing_cols = [col for col in required_cols if col not in data.columns]
+    if missing_cols:
+        raise ValueError(f"数据文件中缺少必要的列: {missing_cols}")
+    
+    # 综合热浪事件变量
+    data['HW_event_combined'] = (
+        (data['intensity'] > 0) & 
+        (data['count'] > 0) & 
+        (data['duration'] > 0)
+    ).astype(int)
+    
+    # 保存原始值
+    data['LSWT_original'] = data[mediator_var].copy()
+    
+    # 标准差（反标准化用）
+    climate_stds = {var: data[var].std() for var in climate_vars}
+    lswt_std = data[mediator_var].std()
+    
+    # 标准化（用于贡献度计算）
+    scaler = StandardScaler()
+    cols_to_scale = [mediator_var] + climate_vars
+    data_standardized = data.copy()
+    data_standardized[cols_to_scale] = scaler.fit_transform(data[cols_to_scale])
+    
+    # ========== 第一部分：气候因子对湖泊变暖的贡献度（使用代码1的方法） ==========
+    X_multi_std = sm.add_constant(data_standardized[climate_vars])
+    y_lswt_std = data_standardized[mediator_var]
+    multi_model_std = sm.OLS(y_lswt_std, X_multi_std).fit()
+    
+    # 计算方差膨胀因子(VIF)检查多重共线性
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+    vif_data = pd.DataFrame()
+    vif_data["Variable"] = climate_vars
+    vif_data["VIF"] = [variance_inflation_factor(X_multi_std.values, i+1) for i in range(len(climate_vars))]
+    print("方差膨胀因子(VIF):")
+    print(vif_data)
+    
+    total_effect = multi_model_std.params[climate_vars].abs().sum()
+    contribution_results = []
+    for var in climate_vars:
+        beta_std = multi_model_std.params[var]
+        se_std = multi_model_std.bse[var]
+        p_value = multi_model_std.pvalues[var]
+        beta_actual = beta_std * (lswt_std / climate_stds[var])
+        contribution = (abs(beta_std) / total_effect * 100)
+        sig = get_significance(p_value)
+        
+        contribution_results.append({
+            '类型': '气候因子贡献度',
+            '气候因子': var,
+            '标准化系数': beta_std,
+            '实际系数(℃)': beta_actual,
+            '贡献度(%)': contribution,
+            'p值': p_value,
+            '显著性': sig
+        })
+    
+    # ========== 第二部分：链式效应（使用代码2的方法） ==========
+    # 使用原始单位数据进行回归分析
+    X_multi_orig = sm.add_constant(data[climate_vars])
+    y_lswt_orig = data[mediator_var]
+    multi_model_orig = sm.OLS(y_lswt_orig, X_multi_orig).fit()
+    
+    # 使用原始水温值进行Logit回归
+    X_logit = sm.add_constant(data['LSWT_original'])
+    y_hw = data['HW_event_combined']
+    
+    # 检查类别平衡
+    event_count = y_hw.sum()
+    non_event_count = len(y_hw) - event_count
+    event_proportion = event_count / len(y_hw)
+    print(f"热浪事件数量: {event_count} (占比: {event_proportion*100:.2f}%)")
+    
+    # 使用类别权重解决不平衡问题
+    if event_proportion < 0.1 or event_proportion > 0.9:
+        weights = np.where(y_hw == 1, non_event_count/event_count, 1)
+        logit_model = sm.Logit(y_hw, X_logit).fit(disp=0, weights=weights)
+        print("使用类别权重以解决样本不平衡问题")
+    else:
+        logit_model = sm.Logit(y_hw, X_logit).fit(disp=0)
+    
+    # 计算水温对热浪的边际效应（水温每升高1℃）
+    marginal_effect_per_degree = logit_model.get_margeff(at='mean').margeff[0] * 100
+    print(f"水温每升高1℃对热浪概率的边际效应: {marginal_effect_per_degree:.4f}%")
+    
+    # 获取Logit模型系数和标准误
+    logit_coef = logit_model.params['LSWT_original']
+    se_logit = logit_model.bse['LSWT_original']
+    
+    # 链式效应计算
+    chain_results = []
+    for var in climate_vars:
+        # a路径系数: 气候因子每变化1单位，导致LSWT变化多少℃
+        a_coef = multi_model_orig.params[var]
+        se_a = multi_model_orig.bse[var]
+        
+        # 计算气候因子变化1个单位引起的水温变化(℃)
+        temp_change = a_coef
+        
+        # 链式效应计算：气候因子变化1个单位 → 水温变化 → 热浪概率变化
+        chain_effect = temp_change * marginal_effect_per_degree
+        
+        # Sobel检验
+        p_value, z_score = sobel_test(a_coef, se_a, logit_coef, se_logit)
+        sig = get_significance(p_value)
+        
+        # 计算效应量增强因子
+        effect_size = abs(chain_effect)
+        enhancement = ""
+        if effect_size < 5:  # 小于5%视为小效应
+            enhancement = "考虑非线性效应"
+        if effect_size < 1:  # 小于1%视为微小效应
+            enhancement = "建议检查交互效应"
+        
+        chain_results.append({
+            '类型': '热浪链式效应',
+            '气候因子': var,
+            '链式效应(%)': chain_effect,
+            'p值': p_value,
+            '显著性': sig,
+            '效应量评估': enhancement,
+            'z值': z_score,
+            '水温变化(℃)': temp_change
+        })
+    
+    # ========== 第三部分：基本统计 ==========
+    # 计算链式效应总和
+    total_chain_effect = sum([x['链式效应(%)'] for x in chain_results])
+    
+    stats_results = [{
+        '类型': '基本统计',
+        '湖泊总数': len(data),
+        '热浪事件数量': event_count,
+        '平均水温(℃)': data['LSWT_original'].mean(),
+        '热浪事件比例(%)': event_proportion * 100,
+        '链式效应(%)': f"总：{total_chain_effect:.4f}",
+        '水温标准差(℃)': lswt_std
+    }]
+    
+    # ========== 第四部分：可视化分析 ==========
+    plt.figure(figsize=(15, 5))
+    
+    # 1. 贡献度可视化
+    plt.subplot(1, 3, 1)
+    df_contrib = pd.DataFrame(contribution_results)
+    colors = ['skyblue', 'lightgreen', 'salmon', 'gold', 'violet']
+    plt.bar(df_contrib['气候因子'], df_contrib['贡献度(%)'], color=colors)
+    plt.title('气候因子对湖泊变暖的贡献度')
+    plt.ylabel('贡献度(%)')
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    # 添加显著性标记
+    for i, row in df_contrib.iterrows():
+        plt.text(i, row['贡献度(%)'] + 1, row['显著性'], 
+                 ha='center', fontsize=12)
+    
+    # 2. 链式效应可视化
+    plt.subplot(1, 3, 2)
+    df_chain = pd.DataFrame(chain_results)
+    colors = ['green' if x > 0 else 'red' for x in df_chain['链式效应(%)']]
+    bars = plt.bar(df_chain['气候因子'], df_chain['链式效应(%)'], color=colors)
+    
+    # 添加实际水温变化值
+    for i, bar in enumerate(bars):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height/2, 
+                 f"{df_chain.loc[i, '水温变化(℃)']:.3f}℃", 
+                 ha='center', va='center', color='white', fontweight='bold')
+    
+    plt.title('气候因子对热浪事件的链式效应')
+    plt.ylabel('效应大小(%)')
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    # 3. 水温与热浪关系可视化
+    plt.subplot(1, 3, 3)
+    # 创建水温分箱
+    data['LSWT_bin'] = pd.cut(data['LSWT_original'], bins=10)
+    bin_stats = data.groupby('LSWT_bin')['HW_event_combined'].agg(['mean', 'count'])
+    bin_stats['mean'] *= 100  # 转换为百分比
+    
+    # 绘制热浪概率随水温变化
+    plt.plot(bin_stats.index.astype(str), bin_stats['mean'], 'o-', color='darkred')
+    plt.title('水温升高对热浪发生概率的影响')
+    plt.ylabel('热浪发生概率(%)')
+    plt.xlabel('水温区间(℃)')
+    plt.xticks(rotation=45)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    # 添加样本量标签
+    for i, count in enumerate(bin_stats['count']):
+        plt.text(i, bin_stats['mean'].iloc[i] + 2, f'n={count}', 
+                 ha='center', fontsize=8)
+    
+    plt.tight_layout()
+    
+    # 保存图表
+    if output_path:
+        # 确保输出目录存在
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        plt.savefig(output_path.replace('.xlsx', '_analysis.png').replace('.csv', '_analysis.png'), dpi=300)
+    
+    # ========== 第五部分：合并所有结果 ==========
+    # 创建完整的结果DataFrame
+    all_columns = ['类型', '气候因子', '标准化系数', '实际系数(℃)', '贡献度(%)', 'p值', '显著性', 
+                  '湖泊总数', '热浪事件数量', '平均水温(℃)', '热浪事件比例(%)', '链式效应(%)', 
+                  '水温变化(℃)', '效应量评估', 'z值', '水温标准差(℃)']
+    
+    # 转换贡献度结果
+    contrib_df = pd.DataFrame(contribution_results)
+    
+    # 转换链式效应结果
+    chain_df = pd.DataFrame(chain_results)
+    
+    # 转换统计结果
+    stats_df = pd.DataFrame(stats_results)
+    
+    # 合并所有结果
+    all_results = pd.concat([contrib_df, chain_df, stats_df], ignore_index=True)
+    
+    # 重新排列列顺序
+    all_results = all_results.reindex(columns=all_columns)
+    
+    # ========== 第六部分：保存结果 ==========
+    if output_path:
+        # 确保输出目录存在
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        # 如果输出格式是CSV，只保存主要结果
+        if output_path.endswith('.csv'):
+            all_results.to_csv(output_path, index=False, float_format="%.6f")
+            print(f"分析结果已保存至: {output_path}")
+        else:
+            # 保存为Excel格式（多工作表）
+            with pd.ExcelWriter(output_path) as writer:
+                # 保存主要结果
+                all_results.to_excel(writer, sheet_name='综合分析结果', index=False, float_format="%.6f")
+                
+                # 保存标准化模型摘要
+                multi_std_summary = pd.DataFrame({
+                    '变量': multi_model_std.params.index,
+                    '系数': multi_model_std.params.values,
+                    '标准误': multi_model_std.bse.values,
+                    't值': multi_model_std.tvalues.values,
+                    'p值': multi_model_std.pvalues.values,
+                    '[95% 置信区间]': [
+                        f"[{multi_model_std.conf_int().iloc[i, 0]:.4f}, {multi_model_std.conf_int().iloc[i, 1]:.4f}]" 
+                        for i in range(len(multi_model_std.params))
+                    ]
+                })
+                multi_std_summary.to_excel(writer, sheet_name='标准化回归模型摘要', index=False)
+                
+                # 保存原始单位模型摘要
+                multi_orig_summary = pd.DataFrame({
+                    '变量': multi_model_orig.params.index,
+                    '系数': multi_model_orig.params.values,
+                    '标准误': multi_model_orig.bse.values,
+                    't值': multi_model_orig.tvalues.values,
+                    'p值': multi_model_orig.pvalues.values,
+                    '[95% 置信区间]': [
+                        f"[{multi_model_orig.conf_int().iloc[i, 0]:.4f}, {multi_model_orig.conf_int().iloc[i, 1]:.4f}]" 
+                        for i in range(len(multi_model_orig.params))
+                    ]
+                })
+                multi_orig_summary.to_excel(writer, sheet_name='原始单位回归模型摘要', index=False)
+                
+                # 保存Logit模型摘要
+                logit_summary = pd.DataFrame({
+                    '变量': logit_model.params.index,
+                    '系数': logit_model.params.values,
+                    '标准误': logit_model.bse.values,
+                    'z值': logit_model.tvalues.values,
+                    'p值': logit_model.pvalues.values,
+                    'OR值': np.exp(logit_model.params.values),
+                    '[95% 置信区间]': [
+                        f"[{np.exp(logit_model.conf_int().iloc[i, 0]):.4f}, {np.exp(logit_model.conf_int().iloc[i, 1]):.4f}]" 
+                        for i in range(len(logit_model.params))
+                    ]
+                })
+                logit_summary.to_excel(writer, sheet_name='Logit模型摘要', index=False)
+                
+                # 保存VIF结果
+                vif_data.to_excel(writer, sheet_name='多重共线性诊断', index=False)
+                
+            print(f"分析结果已保存至: {output_path}")
+    
+    return all_results, multi_model_std, multi_model_orig, logit_model
+
+# 示例调用
+if __name__ == "__main__":
+    # 支持CSV和Excel格式的输入
+    input_file = r"D:\连林\全球湖泊表面水温变化：城镇化的影响与机制\11气候变暖和城镇化对LSWT和湖泊热浪的直接与间接影响\城镇化对湖泊热浪\链式效应_气候变化\csv\合并11.csv"  # 或 .xlsx
+    output_file = r"D:\连林\全球湖泊表面水温变化：城镇化的影响与机制\11气候变暖和城镇化对LSWT和湖泊热浪的直接与间接影响\城镇化对湖泊热浪\链式效应_气候变化\csv\气候变化结果.csv"  # 或 .csv
+    
+    results, multi_model_std, multi_model_orig, logit_model = integrated_climate_mediation_analysis(input_file, output_file)
+    
+    # 附加诊断信息
+    print("\n===== 诊断信息 =====")
+    print("标准化多元线性回归模型摘要:")
+    print(multi_model_std.summary())
+    
+    print("\n原始单位多元线性回归模型摘要:")
+    print(multi_model_orig.summary())
+    
+    print("\nLogit模型摘要:")
+    print(logit_model.summary())
+    
+    print("\n分析完成!")

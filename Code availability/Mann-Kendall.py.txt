@@ -1,0 +1,64 @@
+import pandas as pd
+import numpy as np
+import pymannkendall as mk
+from scipy.stats import linregress
+
+# 读取Excel数据
+# 假设Excel文件路径为 'lake_temperature.xlsx'
+file_path = r"C:\Users\XXXX\Desktop\水温年划分.xlsx"
+df = pd.read_excel(file_path, index_col=0)
+
+# 显示数据样本
+print(df.head())
+
+# 计算泰尔森速率（假设以1981年为基准）
+
+
+def calculate_thiel_sen_rate(temps, start_year=1981):
+    start_temp = temps[0]  # 1981年温度
+    end_temp = temps[-1]  # 最后年份的温度
+    years = len(temps)
+    rate = (end_temp - start_temp) / (years - 1)  # 泰尔森速率
+    return rate
+
+
+# 计算每个湖泊的泰尔森速率
+df['Thiel_Sen_Rate'] = df.apply(
+    lambda row: calculate_thiel_sen_rate(row.values), axis=1)
+
+# 计算Mann-Kendall显著性
+
+
+def mann_kendall_significance(temps):
+    result = mk.original_test(temps)
+    p_value = result.p
+    return p_value
+
+
+# 计算每个湖泊的Mann-Kendall显著性
+df['Mann_Kendall_PValue'] = df.apply(
+    lambda row: mann_kendall_significance(row.values), axis=1)
+
+# 判断显著性和趋势类型
+df['Trend'] = np.where((df['Mann_Kendall_PValue'] < 0.05) & (df['Thiel_Sen_Rate'] > 0), '升温',
+                       np.where((df['Mann_Kendall_PValue'] < 0.05) & (df['Thiel_Sen_Rate'] < 0), '降温', '无显著趋势'))
+
+# 统计升温、降温趋势和无显著趋势的湖泊
+升温湖泊 = df[df['Trend'] == '升温']
+降温湖泊 = df[df['Trend'] == '降温']
+无显著趋势湖泊 = df[df['Trend'] == '无显著趋势']
+
+# 计算百分比
+total_lakes = len(df)
+升温百分比 = (len(升温湖泊) / total_lakes) * 100
+降温百分比 = (len(降温湖泊) / total_lakes) * 100
+无显著趋势百分比 = (len(无显著趋势湖泊) / total_lakes) * 100
+
+print(f"升温趋势湖泊占比：{升温百分比:.2f}%")
+print(f"降温趋势湖泊占比：{降温百分比:.2f}%")
+print(f"无显著趋势湖泊占比：{无显著趋势百分比:.2f}%")
+
+# 输出统计结果
+print("\n趋势统计结果：")
+print(df[['Thiel_Sen_Rate', 'Mann_Kendall_PValue', 'Trend']])
+df.to_excel(r"C:\Users\XXXX\Desktop\显著性计算结果.xlsx")

@@ -1,0 +1,43 @@
+import geopandas as gpd
+import pandas as pd
+from shapely.geometry import Point
+
+# 1. 读取矢量数据
+lake_gdf = gpd.read_file("d:\\连林\\全球城镇化加速了LSWT变暖的趋势\\1.有无城镇化的LSWT比较\\(新城市边界属性)ty剔除冰川后有城市的小型湖泊.shp")  # 湖泊点数据
+region_gdf = gpd.read_file("D:\\连林\\城市边界\\GUB_Global_2020\\TY_GUB_Global_2020_10km2_G7.shp")  # 区域面数据
+
+# 2. 计算每个矢量面的中心点（重心）
+region_gdf['centroid'] = region_gdf.geometry.centroid
+
+# 3. 计算湖泊点到矢量面中心点的距离
+# 创建一个空的列表来保存结果
+distance_results = []
+
+# 遍历湖泊点数据
+for idx, lake in lake_gdf.iterrows():
+    lake_point = lake.geometry  # 获取湖泊点的坐标
+    hylak_id = lake['Hylak_id']  # 获取湖泊点的Hylak_id
+    
+    # 只匹配第一个包含湖泊点的矢量面
+    found_region = False  # 用来标记是否找到匹配的区域面
+    for _, region in region_gdf.iterrows():
+        region_center = region['centroid']  # 获取矢量面的中心点
+        # 判断湖泊点是否在该矢量面内
+        if region.geometry.contains(lake_point):
+            # 计算湖泊点到矢量面中心点的距离
+            distance = lake_point.distance(region_center)
+            distance_results.append({'Hylak_id': hylak_id, 'Region_uid': region['uid'], 'Distance': distance})
+            found_region = True  # 标记已找到匹配区域面
+            break  # 跳出循环，只保存第一个匹配的区域面
+    
+    # 如果没有找到匹配区域面，可以选择记录为无匹配或跳过
+    if not found_region:
+        distance_results.append({'Hylak_id': hylak_id, 'Region_uid': None, 'Distance': None})
+
+# 4. 将结果保存到 DataFrame 中
+distance_df = pd.DataFrame(distance_results)
+
+# 5. 导出到 Excel
+distance_df.to_excel('C:\\Users\\302\\Desktop\\ceshi\\lake_distance_results1.xlsx', index=False)
+
+print("计算完成，结果已保存到 lake_distance_results1.xlsx")

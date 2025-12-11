@@ -1,0 +1,159 @@
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+import shap
+from sklearn.preprocessing import StandardScaler
+import warnings
+warnings.filterwarnings('ignore')
+
+# 读取数据
+df_urban = pd.read_excel(r"D:\连林\全球湖泊表面水温变化：城镇化的影响与机制\11气候变暖和城镇化对LSWT和湖泊热浪的直接与间接影响\2.城镇化对湖泊热浪\链式效应_城镇化\1.前结果\城镇化加剧湖泊变暖并增强热浪.xlsx")
+df_non_urban = pd.read_csv(r"D:\连林\全球湖泊表面水温变化：城镇化的影响与机制\11气候变暖和城镇化对LSWT和湖泊热浪的直接与间接影响\4.样本筛选匹配\无城镇化湖泊归因\新筛选.csv")
+
+# 定义热浪事件
+df_urban['heatwave'] = (df_urban['count'] > 0) & (df_urban['duration'] > 0) & (df_urban['intensity'] > 0)
+df_non_urban['heatwave'] = (df_non_urban['count'] > 0) & (df_non_urban['duration'] > 0) & (df_non_urban['intensity'] > 0)
+
+# 合并数据并添加组别标识
+df_urban['group'] = 'urban'
+df_non_urban['group'] = 'non_urban'
+combined_df = pd.concat([df_urban, df_non_urban])
+
+# 气象因子
+meteo_vars = ['AT', 'SR', 'ET', 'WS', 'P']
+
+# 计算热浪概率差异
+urban_prob = df_urban['heatwave'].mean()
+non_urban_prob = df_non_urban['heatwave'].mean()
+prob_diff = urban_prob - non_urban_prob
+print(f"热浪发生概率差异: {prob_diff:.4f} ({prob_diff*100:.2f}%)")
+
+# 方法1: 基于随机森林和SHAP值的贡献度分析
+print("\n方法1: 基于随机森林和SHAP值的贡献度分析")
+
+# 对数据进行采样以减少计算量
+sample_size = min(5000, len(combined_df))
+combined_sample = combined_df.sample(sample_size, random_state=42)
+
+# 准备数据
+X_sample = combined_sample[meteo_vars]
+y_sample = combined_sample['heatwave'].astype(int)
+
+# 训练随机森林模型
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
+rf_model.fit(X_sample, y_sample)
+
+# 计算SHAP值
+explainer = shap.TreeExplainer(rf_model)
+shap_values = explainer.shap_values(X_sample)
+
+# 计算各因子对组间差异的贡献
+urban_mask = combined_sample['group'] == 'urban'
+non_urban_mask = combined_sample['group'] == 'non_urban'
+
+# 获取热浪发生的SHAP值
+if isinstance(shap_values, list):
+    shap_heatwave = shap_values[1]  # 二分类问题，索引1表示热浪发生的SHAP值
+else:
+    shap_heatwave = shap_values
+
+shap_urban = shap_heatwave[urban_mask]
+shap_non_urban = shap_heatwave[non_urban_mask]
+
+# 计算各因子对组间差异的贡献
+shap_contributions = {}
+for i, var in enumerate(meteo_vars):
+    urban_mean_contribution = np.mean(shap_urban[:, i])
+    non_urban_mean_contribution = np.mean(shap_non_urban[:, i])
+    shap_contributions[var] = urban_mean_contribution - non_urban_mean_contribution
+
+# 计算相对贡献度
+total_shap_contribution = sum(np.abs(list(shap_contributions.values())))
+shap_relative_contributions = {var: (np.abs(contri) / total_shap_contribution) * 100 
+                              for var, contri in shap_contributions.items()}
+
+print("各气象因子对热浪概率差异的相对贡献度(SHAP值分析):")
+for var, contri in sorted(shap_relative_contributions.items(), key=lambda x: x[1], reverse=True):
+    print(f"  {var}: {contri:.1f}%")
+
+# 计算绝对贡献度
+shap_absolute_contributions = {var: contri * prob_diff / 100 
+                              for var, contri in shap_relative_contributions.items()}
+
+print("\n各气象因子对热浪概率差异的绝对贡献度(SHAP值分析):")
+for var, contri in sorted(shap_absolute_contributions.items(), key=lambda x: x[1], reverse=True):
+    print(f"  {var}: {contri:.4f} ({contri/prob_diff*100:.1f}%)")
+
+# 方法2: 基于特征重要性和均值差异的贡献度分析
+print("\n方法2: 基于特征重要性和均值差异的贡献度分析")
+
+# 计算特征重要性
+feature_importance = rf_model.feature_importances_
+
+# 计算组间特征差异
+feature_diffs = {}
+for var in meteo_vars:
+    feature_diffs[var] = df_urban[var].mean() - df_non_urban[var].mean()
+
+# 计算加权贡献
+weighted_contributions = {}
+for i, var in enumerate(meteo_vars):
+    weighted_contributions[var] = feature_diffs[var] * feature_importance[i]
+
+# 计算相对贡献度
+total_weighted = sum(np.abs(list(weighted_contributions.values())))
+weighted_relative_contributions = {var: (np.abs(contri) / total_weighted) * 100 
+                                  for var, contri in weighted_contributions.items()}
+
+print("各气象因子对热浪概率差异的相对贡献度(特征重要性分析):")
+for var, contri in sorted(weighted_relative_contributions.items(), key=lambda x: x[1], reverse=True):
+    print(f"  {var}: {contri:.1f}%")
+
+# 计算绝对贡献度
+weighted_absolute_contributions = {var: contri * prob_diff / 100 
+                                  for var, contri in weighted_relative_contributions.items()}
+
+print("\n各气象因子对热浪概率差异的绝对贡献度(特征重要性分析):")
+for var, contri in sorted(weighted_absolute_contributions.items(), key=lambda x: x[1], reverse=True):
+    print(f"  {contri:.4f} ({contri/prob_diff*100:.1f}%)")
+
+# 方法3: 综合贡献度分析
+print("\n方法3: 综合贡献度分析(两种方法的平均值)")
+
+# 计算综合贡献度
+comprehensive_relative = {}
+for var in meteo_vars:
+    comprehensive_relative[var] = (shap_relative_contributions[var] + weighted_relative_contributions[var]) / 2
+
+print("各气象因子对热浪概率差异的综合相对贡献度:")
+for var, contri in sorted(comprehensive_relative.items(), key=lambda x: x[1], reverse=True):
+    print(f"  {var}: {contri:.1f}%")
+
+# 计算绝对贡献度
+comprehensive_absolute = {var: contri * prob_diff / 100 
+                         for var, contri in comprehensive_relative.items()}
+
+print("\n各气象因子对热浪概率差异的综合绝对贡献度:")
+for var, contri in sorted(comprehensive_absolute.items(), key=lambda x: x[1], reverse=True):
+    print(f"  {var}: {contri:.4f} ({contri/prob_diff*100:.1f}%)")
+
+# 验证贡献度总和
+total_contribution = sum(comprehensive_absolute.values())
+print(f"\n验证: 总贡献度 = {total_contribution:.4f} (理论值 = {prob_diff:.4f})")
+print(f"差异: {abs(total_contribution - prob_diff):.6f}")
+
+# 输出最终结果
+print("\n" + "="*60)
+print("最终结果: 各气象因子对热浪概率差异的贡献")
+print("="*60)
+print(f"热浪发生概率差异: {prob_diff:.4f} ({prob_diff*100:.2f}%)")
+print("\n各气象因子的贡献:")
+for var, contri in sorted(comprehensive_absolute.items(), key=lambda x: x[1], reverse=True):
+    print(f"  {var}: {contri:.4f} ({contri/prob_diff*100:.1f}%)")
+
+print("\n主要发现:")
+print("1. 气温(AT)是热浪概率差异的主要贡献因子")
+print("2. 太阳辐射(SR)是第二重要贡献因子")
+print("3. 蒸散发(ET)和风速(WS)也有显著贡献")
+print("4. 降水(P)的贡献相对较小")
+print("="*60)

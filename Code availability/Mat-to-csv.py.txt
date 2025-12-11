@@ -1,0 +1,19 @@
+import h5py
+import csv
+
+def mat_to_csv(mat_file, csv_file):
+    data = h5py.File(mat_file, 'r')  # 使用h5py库加载.mat文件
+
+    with open(csv_file, 'w', newline='') as file:
+        writer = csv.writer(file)
+
+        for key in data.keys():
+            writer.writerow([key])  # 写入变量名作为列标题
+            writer.writerows(data[key])  # 写入变量的值
+
+    print(f"转换完成，已保存为 {csv_file} 文件。")
+
+# 示例用法
+mat_file = 'daily_LSWT_data.mat'  # 输入的.mat文件名
+csv_file = 'daily_LSWT_data.csv'  # 输出的.csv文件名
+mat_to_csv(mat_file, csv_file)

@@ -1,0 +1,171 @@
+import geopandas as gpd
+import math
+import logging
+from shapely.geometry import MultiPolygon, GeometryCollection
+from shapely.ops import unary_union
+
+def generate_equal_area_buffer(input_shp_path, output_buffer_path, scale_factor):
+    logging.info("开始读取输入数据...")
+
+    # 读取输入矢量数据
+    try:
+        gdf = gpd.read_file(input_shp_path)
+        logging.info(f"成功读取矢量数据: {input_shp_path}")
+    except Exception as e:
+        logging.error(f"读取输入矢量数据失败：{e}")
+        return
+
+    # 检查是否存在 'uid' 字段
+    if 'uid' not in gdf.columns:
+        logging.error("输入数据缺少 'uid' 字段。")
+        return
+
+    # 获取原始数据的坐标系
+    original_crs = gdf.crs
+    logging.info(f"原始数据的坐标系为: {original_crs}")
+
+    # 简化和修复几何体，保证输入数据质量
+    gdf['geometry'] = gdf['geometry'].apply(preprocess_geometry)
+
+    # 检查是否所有几何体均无效
+    valid_geometries = gdf[gdf['geometry'].notna()]
+    if valid_geometries.empty:
+        logging.error("所有几何体均无效，无法继续处理。")
+        return
+
+    # 创建输出目录
+    output_directory = os.path.dirname(output_buffer_path)
+    os.makedirs(output_directory, exist_ok=True)
+
+    uid_list = []
+    buffer_list = []
+
+    for index, row in gdf.iterrows():
+        uid = row['uid']
+        geometry = row['geometry']
+
+        if geometry is None or not geometry.is_valid:
+            logging.warning(f"无效几何体，跳过 uid={uid} 的处理。")
+            continue
+
+        try:
+            # 如果是复杂几何体（MultiPolygon/GeometryCollection），拆分处理
+            if isinstance(geometry, (MultiPolygon, GeometryCollection)):
+                buffered_geometry = process_complex_geometry(geometry, scale_factor)
+            else:
+                buffered_geometry = attempt_buffer_with_tolerance(geometry, scale_factor, tolerance_ratio=0.01, max_iterations=200)
+
+            if buffered_geometry:
+                uid_list.append(uid)
+                buffer_list.append(buffered_geometry)
+                area_diff_percentage = abs(buffered_geometry.area - geometry.area * scale_factor) / (geometry.area * scale_factor) * 100
+                logging.info(f"UID={uid} 缓冲成功：误差={area_diff_percentage:.2f}%")
+            else:
+                logging.warning(f"缓冲区生成失败，跳过 uid={uid} 的处理。")
+        except Exception as e:
+            logging.error(f"处理 uid={uid} 时发生错误: {e}")
+
+    # 构建输出 GeoDataFrame
+    if buffer_list:
+        buffer_gdf = gpd.GeoDataFrame({'uid': uid_list, 'geometry': buffer_list}, crs=original_crs)
+        logging.info(f"保存缓冲区结果到: {output_buffer_path}")
+        try:
+            buffer_gdf.to_file(output_buffer_path)
+            logging.info("缓冲区文件已保存成功。")
+        except Exception as e:
+            logging.error(f"保存缓冲区文件失败：{e}")
+    else:
+        logging.error("没有有效的几何体数据，无法创建 GeoDataFrame。")
+
+def preprocess_geometry(geometry, simplify_tolerance=30):
+    """修复并简化几何体"""
+    try:
+        # 修复无效几何体
+        if not geometry.is_valid:
+            geometry = geometry.buffer(0)
+        # 简化几何体，减少复杂性
+        geometry = geometry.simplify(simplify_tolerance)  # 容差与分辨率一致（30m）
+        return geometry if geometry.is_valid else None
+    except Exception as e:
+        logging.warning(f"几何体修复失败: {e}")
+        return None
+
+def process_complex_geometry(geometry, scale_factor):
+    """处理 MultiPolygon 或 GeometryCollection"""
+    parts = [part for part in geometry.geoms if part.is_valid]
+    buffered_parts = [attempt_buffer_with_tolerance(part, scale_factor, tolerance_ratio=0.01, max_iterations=200) for part in parts]
+    # 合并所有缓冲区
+    return unary_union([bp for bp in buffered_parts if bp is not None])
+
+def attempt_buffer_with_tolerance(geometry, scale_factor, max_iterations=200, tolerance_ratio=0.01, area_reduction_step=0.95):
+    """
+    尝试生成缓冲区，如果失败则动态减少目标面积进行多次尝试
+    :param geometry: 输入几何体
+    :param scale_factor: 缓冲区面积放大比例
+    :param max_iterations: 最大迭代次数
+    :param tolerance_ratio: 面积误差容忍比例
+    :param area_reduction_step: 面积减少步长
+    """
+    original_area = geometry.area
+    target_area = original_area * scale_factor
+
+    for attempt in range(3):  # 最多尝试3次降低目标面积
+        buffered_geometry = generate_equal_area_buffer_iterative(geometry, target_area, max_iterations, tolerance_ratio)
+        if buffered_geometry:
+            return buffered_geometry
+        target_area *= area_reduction_step  # 动态降低目标面积
+
+    logging.warning(f"多次尝试后缓冲区仍然生成失败，返回 None。")
+    return None
+
+def generate_equal_area_buffer_iterative(geometry, target_area, max_iterations=200, tolerance_ratio=0.01):
+    """
+    通过迭代调整缓冲距离生成近似等面积缓冲区
+    """
+    original_area = geometry.area
+    min_buffer_distance = 0
+    max_buffer_distance = math.sqrt(target_area / math.pi) - math.sqrt(original_area / math.pi)
+    tolerance = tolerance_ratio * target_area  # 面积误差容忍范围
+
+    for iteration in range(max_iterations):
+        buffer_distance = (min_buffer_distance + max_buffer_distance) / 2
+        buffered_geometry = geometry.buffer(buffer_distance)
+
+        if not buffered_geometry.is_valid:
+            buffered_geometry = buffered_geometry.buffer(0)  # 修复缓冲结果
+
+        if buffered_geometry.is_empty:
+            max_buffer_distance = buffer_distance
+            continue
+
+        buffered_area = buffered_geometry.area
+        area_diff = buffered_area - target_area
+
+        # 判断是否在容忍范围内
+        if abs(area_diff) <= tolerance:
+            logging.info(f"缓冲区成功生成: 误差={area_diff:.2f} (容忍范围: {tolerance:.2f})")
+            return buffered_geometry
+
+        # 调整缓冲距离范围
+        if area_diff > 0:
+            max_buffer_distance = buffer_distance
+        else:
+            min_buffer_distance = buffer_distance
+
+    logging.warning(f"缓冲区生成未达到容忍范围，最后误差: {area_diff:.2f}")
+    return buffered_geometry if abs(buffered_geometry.area - target_area) <= tolerance else None
+
+if __name__ == '__main__':
+    # 配置日志
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    # 输入和输出文件路径
+    input_shp_path = r"D:\连林\城市边界\GUB_Global_2020\TY_GUB_Global_2020_10km2.shp"  # 替换为您的输入文件路径
+    output_buffer_path = r"D:\连林\城市边界\GUB_Global_2020\TY_GUB_Global_2020_10km2_G77.shp"  # 替换为您的输出文件路径
+
+    # 缓冲区放大比例
+    scale_factor = 7  # 等面积放大 2 倍
+
+    # 调用主函数
+    generate_equal_area_buffer(input_shp_path, output_buffer_path, scale_factor)
+    logging.info("处理完成。")

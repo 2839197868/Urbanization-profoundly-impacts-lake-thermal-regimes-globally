@@ -1,0 +1,539 @@
+import pandas as pd
+import statsmodels.api as sm
+from scipy.stats import norm
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+import matplotlib.pyplot as plt
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+def sobel_test(a, se_a, b, se_b):
+    """
+    Sobel检验计算乘积效应的显著性
+    """
+    indirect_effect = a * b
+    se_indirect = np.sqrt(a**2 * se_b**2 + b**2 * se_a**2)
+    z_score = indirect_effect / se_indirect
+    p_value = 2 * (1 - norm.cdf(abs(z_score)))
+    return p_value, z_score
+
+def get_significance(p_value):
+    """根据p值返回显著性标记"""
+    if p_value < 0.001:
+        return "***"
+    elif p_value < 0.01:
+        return "**"
+    elif p_value < 0.05:
+        return "*"
+    else:
+        return ""
+
+def enhanced_mediation_analysis(data_path, output_path=None):
+    """
+    增强版城镇化对湖泊变暖及热浪影响的中介效应分析
+    """
+    # 读取数据
+    data = pd.read_excel(data_path)
+    
+    # 定义变量
+    urban_var = 'UI'          # 城市开发强度
+    lake_temp_var = 'LSWT'    # 湖泊表面水温
+    hw_vars = {
+        'intensity': 'intensity',  # 热浪强度
+        'count': 'count',          # 热浪次数
+        'duration': 'duration'     # 热浪持续时间
+    }
+    climate_vars = ['AT', 'P', 'SR', 'WS', 'ET']  # 气候变化因子
+    
+    # 创建综合热浪事件变量（三指标同时不为零）
+    data['HW_event_combined'] = (
+        (data[hw_vars['intensity']] > 0) & 
+        (data[hw_vars['count']] > 0) & 
+        (data[hw_vars['duration']] > 0)
+    ).astype(int)
+    
+    # 保存原始值用于Logit回归
+    data['LSWT_original'] = data[lake_temp_var].copy()
+    
+    # 标准差（反标准化用）
+    urban_std = data[urban_var].std()
+    lswt_std = data[lake_temp_var].std()
+    hw_stds = {k: data[v].std() for k, v in hw_vars.items()}  # 各热浪指标的原始标准差
+    climate_stds = {var: data[var].std() for var in climate_vars}
+    
+    # 数据标准化
+    scaler = StandardScaler()
+    cols_to_scale = [urban_var, lake_temp_var] + list(hw_vars.values()) + climate_vars
+    data[cols_to_scale] = scaler.fit_transform(data[cols_to_scale])
+    
+    # 用列表收集所有结果
+    results_list = []
+    
+    # ============== UI → LSWT 的中介效应分析 ==============
+    
+    # 1. UI -> LSWT 的直接效应
+    X_direct = sm.add_constant(data[urban_var])
+    y_direct = data[lake_temp_var]
+    model_direct = sm.OLS(y_direct, X_direct).fit()
+    
+    direct_effect = model_direct.params[urban_var]
+    direct_effect_actual = direct_effect * (lswt_std / urban_std)
+    direct_effect_p = model_direct.pvalues[urban_var]
+    
+    # 添加直接效应
+    results_list.append({
+        '分析部分': 'UI对LSWT影响',
+        '效应类型': '直接效应',
+        '气候因子': None,
+        '值': round(direct_effect_actual, 4),
+        '单位': '℃/UI单位',
+        'p值': round(direct_effect_p, 4) if direct_effect_p >= 0.0001 else f"{direct_effect_p:.4e}",
+        '显著性': get_significance(direct_effect_p)
+    })
+    
+    # 2. 间接效应 - 气候因子分解
+    total_indirect = 0
+    indirect_effects = {}
+    
+    for climate_var in climate_vars:
+        # a路径: UI → 气候因子
+        model_mediator = sm.OLS(data[climate_var], X_direct).fit()
+        a = model_mediator.params[urban_var]
+        se_a = model_mediator.bse[urban_var]
+        
+        # b路径: 气候因子 → LSWT (控制UI)
+        X_outcome = sm.add_constant(data[[urban_var, climate_var]])
+        model_outcome = sm.OLS(data[lake_temp_var], X_outcome).fit()
+        b = model_outcome.params[climate_var]
+        se_b = model_outcome.bse[climate_var]
+        
+        # 计算间接效应
+        indirect_effect = a * b
+        total_indirect += indirect_effect
+        indirect_effect_actual = indirect_effect * (lswt_std / urban_std)
+        indirect_effects[climate_var] = indirect_effect_actual
+        
+        # 计算间接效应的显著性
+        p_value, _ = sobel_test(a, se_a, b, se_b)
+        
+        # 添加到结果
+        results_list.append({
+            '分析部分': 'UI对LSWT影响',
+            '效应类型': '间接效应',
+            '气候因子': climate_var,
+            '值': round(indirect_effect_actual, 4),
+            '单位': '℃/UI单位',
+            'p值': round(p_value, 4) if p_value >= 0.0001 else f"{p_value:.4e}",
+            '显著性': get_significance(p_value)
+        })
+    
+    # 总效应
+    total_effect = direct_effect + total_indirect
+    total_effect_actual = total_effect * (lswt_std / urban_std)
+    
+    results_list.append({
+        '分析部分': 'UI对LSWT影响',
+        '效应类型': '总效应',
+        '气候因子': None,
+        '值': round(total_effect_actual, 4),
+        '单位': '℃/UI单位',
+        'p值': round(direct_effect_p, 4) if direct_effect_p >= 0.0001 else f"{direct_effect_p:.4e}",
+        '显著性': get_significance(direct_effect_p)
+    })
+    
+    # 总间接效应
+    total_indirect_actual = total_indirect * (lswt_std / urban_std)
+    results_list.append({
+        '分析部分': 'UI对LSWT影响',
+        '效应类型': '总间接效应',
+        '气候因子': None,
+        '值': round(total_indirect_actual, 4),
+        '单位': '℃/UI单位',
+        'p值': None,
+        '显著性': None
+    })
+    
+    # ============== 效应占比分析 ==============
+    
+    direct_ratio = (direct_effect / total_effect) * 100
+    total_indirect_ratio = (total_indirect / total_effect) * 100
+    
+    results_list.append({
+        '分析部分': '效应占比',
+        '效应类型': '直接效应',
+        '气候因子': None,
+        '值': round(direct_ratio, 4),
+        '单位': '%',
+        'p值': None,
+        '显著性': None
+    })
+    
+    results_list.append({
+        '分析部分': '效应占比',
+        '效应类型': '总间接效应',
+        '气候因子': None,
+        '值': round(total_indirect_ratio, 4),
+        '单位': '%',
+        'p值': None,
+        '显著性': None
+    })
+    
+    for climate_var in climate_vars:
+        climate_ratio = (indirect_effects[climate_var] / total_effect_actual) * 100
+        results_list.append({
+            '分析部分': '效应占比',
+            '效应类型': '气候因子',
+            '气候因子': climate_var,
+            '值': round(climate_ratio, 4),
+            '单位': '%',
+            'p值': None,
+            '显著性': None
+        })
+    
+    # ============== LSWT → 热浪三指标（连续变量）分析 ==============
+    
+    for hw_type, hw_var in hw_vars.items():
+        # 线性回归模型
+        X_lswt_hw = sm.add_constant(data[lake_temp_var])
+        y_hw = data[hw_var]
+        model_hw = sm.OLS(y_hw, X_lswt_hw).fit()
+        beta = model_hw.params[lake_temp_var]
+        p_val = model_hw.pvalues[lake_temp_var]
+        
+        # 实际单位系数 = 标准化系数 * (热浪指标原始标准差 / LSWT原始标准差)
+        beta_actual = beta * (hw_stds[hw_type] / lswt_std)
+        
+        # 添加到结果
+        results_list.append({
+            '分析部分': f'LSWT对热浪{hw_type}影响',
+            '效应类型': '回归系数',
+            '气候因子': None,
+            '值': round(beta_actual, 4),
+            '单位': f'{hw_type}单位/℃',
+            'p值': round(p_val, 4) if p_val >= 0.0001 else f"{p_val:.4e}",
+            '显著性': get_significance(p_val)
+        })
+    
+    # ============== UI → LSWT → 热浪三指标（连续变量）链式效应 ==============
+    
+    # 计算UI->LSWT的总效应模型
+    model_total = sm.OLS(data[lake_temp_var], sm.add_constant(data[urban_var])).fit()
+    total_effect_coef = model_total.params[urban_var]
+    se_total = model_total.bse[urban_var]
+    
+    for hw_type, hw_var in hw_vars.items():
+        # 获取LSWT对热浪指标的实际单位系数
+        beta_actual = next((item['值'] for item in results_list 
+                          if item['分析部分'] == f'LSWT对热浪{hw_type}影响' 
+                          and item['效应类型'] == '回归系数'), None)
+        
+        # 获取标准化系数和标准误
+        model_hw = sm.OLS(data[hw_var], sm.add_constant(data[lake_temp_var])).fit()
+        beta_coef = model_hw.params[lake_temp_var]
+        se_beta = model_hw.bse[lake_temp_var]
+        
+        if beta_actual is not None:
+            # 链式效应计算
+            chain_effect = total_effect_actual * beta_actual
+            
+            # Sobel检验计算显著性
+            chain_p_value, _ = sobel_test(total_effect_coef, se_total, beta_coef, se_beta)
+            
+            results_list.append({
+                '分析部分': 'UI通过LSWT影响热浪',
+                '效应类型': f'{hw_type}提升效应',
+                '气候因子': None,
+                '值': round(chain_effect, 4),
+                '单位': f'{hw_type}单位/UI单位',
+                'p值': round(chain_p_value, 4) if chain_p_value >= 0.0001 else f"{chain_p_value:.4e}",
+                '显著性': get_significance(chain_p_value)
+            })
+    
+    # ============== 综合热浪事件分析 ==============
+    
+    # LSWT → 综合热浪事件概率（使用标准化水温值，与原始代码一致）
+    X_logit = sm.add_constant(data[lake_temp_var])  # 使用标准化水温
+    y_hw = data['HW_event_combined']
+    
+    # 处理类别不平衡问题
+    event_count = y_hw.sum()
+    non_event_count = len(y_hw) - event_count
+    event_proportion = event_count / len(y_hw)
+    
+    if event_proportion < 0.1 or event_proportion > 0.9:
+        weights = np.where(y_hw == 1, non_event_count/event_count, 1)
+        model_lswt_hw = sm.Logit(y_hw, X_logit).fit(disp=0, weights=weights)
+        print(f"使用类别权重以解决样本不平衡问题（热浪事件占比: {event_proportion*100:.2f}%）")
+    else:
+        model_lswt_hw = sm.Logit(y_hw, X_logit).fit(disp=0)
+    
+    # 获取原始边际效应（小数形式）
+    raw_marginal_effect = model_lswt_hw.get_margeff(at='mean').margeff[0]
+    or_value = np.exp(model_lswt_hw.params[lake_temp_var])
+    lswt_hw_p = model_lswt_hw.pvalues[lake_temp_var]
+    
+    # 诊断输出
+    print(f"\n===== 诊断信息 =====")
+    print(f"原始边际效应值: {raw_marginal_effect:.6f} (小数形式)")
+    print(f"边际效应百分比: {raw_marginal_effect * 100:.4f}%")
+    print(f"OR值: {or_value:.6f}")
+    
+    # 添加到结果（使用小数形式）
+    results_list.append({
+        '分析部分': 'LSWT对热浪影响',
+        '效应类型': '边际效应(综合)',
+        '气候因子': None,
+        '值': round(raw_marginal_effect, 6),
+        '单位': '概率变化小数/标准化水温单位',
+        'p值': round(lswt_hw_p, 6) if lswt_hw_p >= 0.0001 else f"{lswt_hw_p:.6e}",
+        '显著性': get_significance(lswt_hw_p)
+    })
+    
+    results_list.append({
+        '分析部分': 'LSWT对热浪影响',
+        '效应类型': 'OR值(综合)',
+        '气候因子': None,
+        '值': round(or_value, 6),
+        '单位': '发生比倍数/标准化水温单位',
+        'p值': round(lswt_hw_p, 6) if lswt_hw_p >= 0.0001 else f"{lswt_hw_p:.6e}",
+        '显著性': get_significance(lswt_hw_p)
+    })
+    
+    # UI → LSWT → 综合热浪事件概率链式效应
+    # 计算概率提升效应（使用原始代码的方法）
+    actual_prob_increase = total_effect_actual * raw_marginal_effect * 100
+    
+    # 获取Logit模型的系数和标准误
+    logit_coef = model_lswt_hw.params[lake_temp_var]
+    se_logit = model_lswt_hw.bse[lake_temp_var]
+    
+    # Sobel检验
+    prob_p_value, _ = sobel_test(total_effect_coef, se_total, logit_coef, se_logit)
+    
+    results_list.append({
+        '分析部分': 'UI通过LSWT影响热浪',
+        '效应类型': '概率提升效应(综合)',
+        '气候因子': None,
+        '值': round(actual_prob_increase, 6),
+        '单位': '%热浪概率/UI单位',
+        'p值': round(prob_p_value, 6) if prob_p_value >= 0.0001 else f"{prob_p_value:.6e}",
+        '显著性': get_significance(prob_p_value)
+    })
+    
+    # ============== 基本统计 ==============
+    lake_count = len(data)
+    hw_event_count = event_count
+    
+    results_list.append({
+        '分析部分': '基本统计',
+        '效应类型': '湖泊数量',
+        '气候因子': None,
+        '值': lake_count,
+        '单位': None,
+        'p值': None,
+        '显著性': None
+    })
+    
+    results_list.append({
+        '分析部分': '基本统计',
+        '效应类型': '热浪事件数量(综合)',
+        '气候因子': None,
+        '值': hw_event_count,
+        '单位': None,
+        'p值': None,
+        '显著性': None
+    })
+    
+    results_list.append({
+        '分析部分': '基本统计',
+        '效应类型': '热浪事件比例',
+        '气候因子': None,
+        '值': round(event_proportion * 100, 2),
+        '单位': '%',
+        'p值': None,
+        '显著性': None
+    })
+    
+    # ============== 可视化分析 ==============
+    plt.figure(figsize=(15, 10))
+    
+    # 1. 中介效应分解可视化
+    plt.subplot(2, 2, 1)
+    indirect_df = pd.DataFrame([
+        {'气候因子': '直接效应', '贡献': direct_ratio},
+        {'气候因子': '总间接效应', '贡献': total_indirect_ratio}
+    ] + [
+        {'气候因子': var, '贡献': (indirect_effects[var] / total_effect_actual) * 100} 
+        for var in climate_vars
+    ])
+    
+    colors = ['steelblue', 'lightcoral'] + ['lightgreen', 'gold', 'violet', 'salmon', 'skyblue'][:len(climate_vars)]
+    bars = plt.bar(indirect_df['气候因子'], indirect_df['贡献'], color=colors)
+    plt.title('城镇化对湖泊变暖的中介效应分解')
+    plt.ylabel('贡献度(%)')
+    plt.xticks(rotation=45)
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    # 添加数值标签
+    for bar in bars:
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height, f'{height:.1f}%', 
+                 ha='center', va='bottom', fontsize=9)
+    
+    # 2. 热浪概率提升可视化
+    plt.subplot(2, 2, 2)
+    hw_types = list(hw_vars.keys())
+    chain_effects = [
+        next((item['值'] for item in results_list 
+             if item['分析部分'] == 'UI通过LSWT影响热浪' 
+             and item['效应类型'] == f'{hw_type}提升效应'), None)
+        for hw_type in hw_types
+    ]
+    chain_effects.append(actual_prob_increase)
+    
+    hw_types.append('综合概率')
+    colors = ['skyblue', 'lightgreen', 'salmon', 'gold']
+    bars = plt.bar(hw_types, chain_effects, color=colors)
+    plt.title('城镇化通过水温升高对热浪的影响')
+    plt.ylabel('效应大小')
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    # 添加单位标签
+    units = [
+        next((item['单位'] for item in results_list 
+             if item['分析部分'] == 'UI通过LSWT影响热浪' 
+             and item['效应类型'] == f'{hw_type}提升效应'), '')
+        for hw_type in hw_vars
+    ]
+    units.append('%热浪概率/UI单位')
+    
+    for bar, unit in zip(bars, units):
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height/2, unit, 
+                 ha='center', va='center', color='white', fontweight='bold')
+    
+    # 3. 水温与热浪关系可视化
+    plt.subplot(2, 2, 3)
+    # 创建水温分箱
+    data['LSWT_bin'] = pd.cut(data['LSWT_original'], bins=10)
+    bin_stats = data.groupby('LSWT_bin')['HW_event_combined'].agg(['mean', 'count'])
+    bin_stats['mean'] *= 100  # 转换为百分比
+    
+    # 绘制热浪概率随水温变化
+    plt.plot(bin_stats.index.astype(str), bin_stats['mean'], 'o-', color='darkred')
+    plt.title('水温升高对热浪发生概率的影响')
+    plt.ylabel('热浪发生概率(%)')
+    plt.xlabel('水温区间(℃)')
+    plt.xticks(rotation=45)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    # 添加样本量标签
+    for i, count in enumerate(bin_stats['count']):
+        plt.text(i, bin_stats['mean'].iloc[i] + 2, f'n={count}', 
+                 ha='center', fontsize=8)
+    
+    # 4. 城镇化与水温关系可视化
+    plt.subplot(2, 2, 4)
+    # 创建城镇化分箱
+    data['UI_bin'] = pd.cut(data[urban_var], bins=10)
+    temp_stats = data.groupby('UI_bin')['LSWT_original'].mean()
+    
+    # 绘制水温随城镇化变化
+    plt.plot(temp_stats.index.astype(str), temp_stats, 's-', color='darkblue')
+    plt.title('城镇化强度对湖泊水温的影响')
+    plt.ylabel('平均水温(℃)')
+    plt.xlabel('城镇化强度区间')
+    plt.xticks(rotation=45)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    plt.tight_layout()
+    
+    # 保存图表
+    if output_path:
+        plt.savefig(output_path.replace('.xlsx', '_visualization.png'), dpi=300)
+        print(f"可视化图表已保存到: {output_path.replace('.xlsx', '_visualization.png')}")
+    
+    # ============== 输出诊断信息 ==============
+    print(f"湖泊总数: {lake_count}")
+    print(f"热浪事件数量: {hw_event_count} (占比: {event_proportion*100:.2f}%)")
+    print(f"水温每升高1℃对热浪概率的边际效应: {raw_marginal_effect * 100:.4f}%")
+    print(f"Logit模型伪R² (McFadden): {model_lswt_hw.prsquared:.4f}")
+    
+    # 列表转 DataFrame
+    results_df = pd.DataFrame(results_list)
+    
+    # 保存
+    if output_path:
+        with pd.ExcelWriter(output_path) as writer:
+            # 保存原始数值
+            results_df.to_excel(writer, sheet_name='综合结果', index=False, float_format="%.6f")
+            
+            # 添加模型摘要
+            # 直接效应模型摘要
+            direct_summary = pd.DataFrame({
+                '变量': model_direct.params.index,
+                '系数': model_direct.params.values,
+                '标准误': model_direct.bse.values,
+                't值': model_direct.tvalues.values,
+                'p值': model_direct.pvalues.values,
+                '[95% 置信区间]': [
+                    f"[{model_direct.conf_int().iloc[i, 0]:.4f}, {model_direct.conf_int().iloc[i, 1]:.4f}]" 
+                    for i in range(len(model_direct.params))
+                ]
+            })
+            direct_summary.to_excel(writer, sheet_name='直接效应模型摘要', index=False)
+            
+            # 总效应模型摘要
+            model_total = sm.OLS(data[lake_temp_var], sm.add_constant(data[urban_var])).fit()
+            total_summary = pd.DataFrame({
+                '变量': model_total.params.index,
+                '系数': model_total.params.values,
+                '标准误': model_total.bse.values,
+                't值': model_total.tvalues.values,
+                'p值': model_total.pvalues.values,
+                '[95% 置信区间]': [
+                    f"[{model_total.conf_int().iloc[i, 0]:.4f}, {model_total.conf_int().iloc[i, 1]:.4f}]" 
+                    for i in range(len(model_total.params))
+                ]
+            })
+            total_summary.to_excel(writer, sheet_name='总效应模型摘要', index=False)
+            
+            # Logit模型摘要
+            logit_summary = pd.DataFrame({
+                '变量': model_lswt_hw.params.index,
+                '系数': model_lswt_hw.params.values,
+                '标准误': model_lswt_hw.bse.values,
+                'z值': model_lswt_hw.tvalues.values,
+                'p值': model_lswt_hw.pvalues.values,
+                'OR值': np.exp(model_lswt_hw.params.values),
+                '[95% 置信区间]': [
+                    f"[{np.exp(model_lswt_hw.conf_int().iloc[i, 0]):.4f}, {np.exp(model_lswt_hw.conf_int().iloc[i, 1]):.4f}]" 
+                    for i in range(len(model_lswt_hw.params))
+                ]
+            })
+            logit_summary.to_excel(writer, sheet_name='Logit模型摘要', index=False)
+            
+            # 添加字段说明
+            notes_df = pd.DataFrame({
+                '字段': ['分析部分', '效应类型', '气候因子', '值', '单位', 'p值', '显著性'],
+                '说明': [
+                    '分析的主要部分',
+                    '效应的具体类型',
+                    '气候因子名称（仅用于间接效应分解）',
+                    '效应的数值大小',
+                    '效应的单位',
+                    '统计显著性p值',
+                    '显著性标记（***:p<0.001, **:p<0.01, *:p<0.05）'
+                ]
+            })
+            notes_df.to_excel(writer, sheet_name='字段说明', index=False)
+            
+        print(f"综合结果已保存到: {output_path}")
+    
+    return results_df
+
+# 示例调用
+if __name__ == "__main__":
+    input_file = r"D:\连林\全球湖泊表面水温变化：城镇化的影响与机制\11气候变暖和城镇化对LSWT和湖泊热浪的直接与间接影响\城镇化对湖泊热浪\链式效应\城镇化加剧湖泊变暖并增强热浪.xlsx"
+    output_file = r"D:\连林\全球湖泊表面水温变化：城镇化的影响与机制\11气候变暖和城镇化对LSWT和湖泊热浪的直接与间接影响\城镇化对湖泊热浪\链式效应\城镇化加剧湖泊变暖并增强热浪_最终版.xlsx"
+    results = enhanced_mediation_analysis(input_file, output_file)
+    print("\n分析完成!")
