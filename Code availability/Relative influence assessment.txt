@@ -1,0 +1,42 @@
+import pandas as pd
+import numpy as np
+import pingouin as pg
+
+# 读取数据
+file_path = r"D:\连林\全球湖泊表面水温变化：城镇化的影响与机制\13城镇化下的因子重要性\合并后的完整表格.xlsx"
+df = pd.read_excel(file_path)
+
+# 查看数据基本信息
+print("数据形状:", df.shape)
+print("列名:", df.columns.tolist())
+
+# 保留需要的列：LSWT, UI, LSI, Distance
+df_clean = df[['LSWT', 'UI', 'LSI', 'Distance']].dropna()
+print(f"清洗后样本数: {len(df_clean)}")
+
+# 计算简单相关系数（Pearson）
+simple_corr = df_clean.corr(method='pearson')
+print("\n简单相关系数矩阵:\n", simple_corr)
+
+# 计算偏相关
+# 对于 UI，控制 LSI 和 Distance
+partial_ui = pg.partial_corr(data=df_clean, x='UI', y='LSWT', covar=['LSI', 'Distance'])
+# 对于 LSI，控制 UI 和 Distance
+partial_lsi = pg.partial_corr(data=df_clean, x='LSI', y='LSWT', covar=['UI', 'Distance'])
+# 对于 Distance，控制 UI 和 LSI
+partial_dist = pg.partial_corr(data=df_clean, x='Distance', y='LSWT', covar=['UI', 'LSI'])
+
+print("\n偏相关分析结果（控制其他两个变量）:")
+print(f"UI 与 LSWT 的偏相关系数: r = {partial_ui['r'].values[0]:.4f}, p = {partial_ui['p-val'].values[0]:.4e}")
+print(f"LSI 与 LSWT 的偏相关系数: r = {partial_lsi['r'].values[0]:.4f}, p = {partial_lsi['p-val'].values[0]:.4e}")
+print(f"Distance 与 LSWT 的偏相关系数: r = {partial_dist['r'].values[0]:.4f}, p = {partial_dist['p-val'].values[0]:.4e}")
+
+# 比较影响大小（取绝对值）
+effects = {
+    'UI': abs(partial_ui['r'].values[0]),
+    'LSI': abs(partial_lsi['r'].values[0]),
+    'Distance': abs(partial_dist['r'].values[0])
+}
+print("\n各因子对 LSWT 的偏相关强度（绝对值）:")
+for k, v in sorted(effects.items(), key=lambda x: x[1], reverse=True):
+    print(f"  {k}: {v:.4f}")

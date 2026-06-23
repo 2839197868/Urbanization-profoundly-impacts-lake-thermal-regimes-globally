@@ -1,0 +1,99 @@
+import numpy as np
+from scipy.stats import norm
+import pandas as pd
+
+path = r'D:\work\code\seg_aug\1\1.xls'  # 文件路径
+df = pd.read_excel(path, sheet_name='uhi')  # 表单
+
+def sen_slope(x):
+    """
+    计算 Sen's 斜率估计值
+    """
+    n = len(x)
+    slopes = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            slopes.append((x[j] - x[i]) / (j - i))
+    return np.median(slopes)
+
+
+def mann_kendall(x, alpha=0.05):
+    """
+    计算 Mann-Kendall 检验的统计量、Z 值、p 值和趋势判断
+    趋势分类包括：
+    显著上升（P ≤ 0.05且Z > 0）
+    显著下降（P ≤ 0.05且Z < 0）
+    不显著上升（P > 0.05且Z > 0）
+    不显著下降（P > 0.05且Z < 0）
+    无变化/无显著变化
+    """
+    n = len(x)
+    s = 0
+    for i in range(n - 1):
+        for j in range(i + 1, n):
+            s += np.sign(x[j] - x[i])
+    var_s = n * (n - 1) * (2 * n + 5) / 18
+    if s > 0:
+        z = (s - 1) / np.sqrt(var_s)
+    elif s < 0:
+        z = (s + 1) / np.sqrt(var_s)
+    else:
+        z = 0
+    p = 2 * (1 - norm.cdf(abs(z)))
+    
+    # 趋势判断：五类分类
+    if p <= alpha:
+        if z > 0:
+            trend = "显著上升"
+        elif z < 0:
+            trend = "显著下降"
+        else:
+            trend = "无显著变化"
+    else:
+        if z > 0:
+            trend = "不显著上升"
+        elif z < 0:
+            trend = "不显著下降"
+        else:
+            trend = "无显著变化"
+    
+    return s, z, p, trend
+
+
+result = []
+for y in range(0, 288):  # 288行excel记录
+    LakeName = df.loc[y, 'LakeName']
+    xi = list(df.loc[y].values)
+    xii = xi[1:]  # 排除LakeName列，获取时间序列数据
+    x = xii
+
+    slop = sen_slope(x)
+    s, z, p, trend = mann_kendall(x)
+    result.append([LakeName, slop, trend, z, p])
+
+result_df = pd.DataFrame(result, columns=['LakeName', '斜率估计值', '趋势', 'Z值', 'P值'])
+result_df.to_excel(r'D:\work\code\seg_aug\1\result.xlsx', index=False)
+
+# 打印统计信息
+print("分析完成！")
+print(f"总共分析了 {len(result_df)} 个湖泊")
+print("\n趋势分类统计：")
+trend_counts = result_df['趋势'].value_counts()
+for trend_type in ["显著上升", "显著下降", "不显著上升", "不显著下降", "无显著变化"]:
+    if trend_type in trend_counts:
+        count = trend_counts[trend_type]
+        print(f"{trend_type}: {count}个湖泊 ({count/len(result_df)*100:.2f}%)")
+    else:
+        print(f"{trend_type}: 0个湖泊 (0.00%)")
+
+# 显著性统计
+sig_up = len(result_df[(result_df['趋势'] == "显著上升")])
+sig_down = len(result_df[(result_df['趋势'] == "显著下降")])
+nonsig_up = len(result_df[(result_df['趋势'] == "不显著上升")])
+nonsig_down = len(result_df[(result_df['趋势'] == "不显著下降")])
+no_change = len(result_df[(result_df['趋势'] == "无显著变化")])
+
+print(f"\n显著性统计：")
+print(f"显著变化（上升+下降）：{sig_up + sig_down}个湖泊 ({(sig_up + sig_down)/len(result_df)*100:.2f}%)")
+print(f"不显著变化（上升+下降）：{nonsig_up + nonsig_down}个湖泊 ({(nonsig_up + nonsig_down)/len(result_df)*100:.2f}%)")
+print(f"无显著变化：{no_change}个湖泊 ({no_change/len(result_df)*100:.2f}%)")
